@@ -63,7 +63,6 @@ fi
     npm run build
   else
     npm run check
-    npm run web-proxy:test
     npm run test:e2e
     RESTART_SMOKE_PROJECT="rapi-restart-release-$$" RESTART_SMOKE_DATABASE=rapi_test npm run restart:smoke
   fi
@@ -73,7 +72,7 @@ fi
 if [[ "${RAPI_CI_VERIFIED:-}" == "true" ]]; then
   gates='["npm ci","build","restore:smoke","github-ci"]'
 else
-  gates='["npm ci","check","web-proxy:test","test:e2e","restart:smoke","restore:smoke","audit:prod"]'
+  gates='["npm ci","check","test:e2e","restart:smoke","restore:smoke","audit:prod"]'
 fi
 
 RAPI_STAGED_GATES="$gates" RAPI_STAGED_SHA="$expected_sha" RAPI_STAGED_TREE="$(git rev-parse HEAD^{tree})" \

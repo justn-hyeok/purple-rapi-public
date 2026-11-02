@@ -43,7 +43,6 @@ async function stage(
       gates: [
         "npm ci",
         "check",
-        "web-proxy:test",
         "test:e2e",
         "restart:smoke",
         "restore:smoke",

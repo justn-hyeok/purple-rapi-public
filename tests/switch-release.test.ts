@@ -49,7 +49,6 @@ test("isolated service switch verifies boot revision, rolls back failure and pre
           gates: [
             "npm ci",
             "check",
-            "web-proxy:test",
             "test:e2e",
             "restart:smoke",
             "restore:smoke",
@@ -298,7 +297,6 @@ test("a failed schema rollback still points back to the previous release and sta
           gates: [
             "npm ci",
             "check",
-            "web-proxy:test",
             "test:e2e",
             "restart:smoke",
             "restore:smoke",
