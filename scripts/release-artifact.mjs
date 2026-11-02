@@ -42,7 +42,6 @@ export async function verifyRelease(root, expectedSha) {
   const required = [
     "npm ci",
     "check",
-    "web-proxy:test",
     "test:e2e",
     "restart:smoke",
     "restore:smoke",

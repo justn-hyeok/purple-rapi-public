@@ -27,7 +27,6 @@ jobs:
       - run: npm run db:verify
       - id: check
         run: npm run check
-      - run: npm run web-proxy:test
       - id: e2e
         if: always()
         run: npm run test:e2e

@@ -37,7 +37,6 @@ test("a release needs either the full host gates or the CI-verified set", async 
     await release([
       "npm ci",
       "check",
-      "web-proxy:test",
       "test:e2e",
       "restart:smoke",
       "restore:smoke",

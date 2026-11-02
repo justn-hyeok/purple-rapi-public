@@ -34,7 +34,6 @@ test("first deployment restores observed legacy runtime on failure and never sta
         gates: [
           "npm ci",
           "check",
-          "web-proxy:test",
           "test:e2e",
           "restart:smoke",
           "restore:smoke",

@@ -97,7 +97,6 @@ test("release staging validates a clean SHA and keeps production DB inputs away 
     assert.deepEqual(readFileSync(calls, "utf8").trim().split("\n"), [
       "ci",
       "run check",
-      "run web-proxy:test",
       "run test:e2e",
       "run restart:smoke",
       "run restore:smoke",
