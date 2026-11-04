@@ -6,7 +6,9 @@ set -euo pipefail
 REPO=${RAPI_SOURCE_CHECKOUT:-/home/justn/rapi-agent}
 ROOT=${RAPI_RELEASE_ROOT:-/home/justn/rapi-releases}
 ENV_FILE=${RAPI_SERVICE_ENV_FILE:-/home/justn/rapi-agent/.env}
-GITHUB_REPO=${RAPI_GITHUB_REPOSITORY:-justn-hyeok/rapi-agent}
+# The repository is whatever origin points at, so moving it needs no change here.
+GITHUB_REPO=${RAPI_GITHUB_REPOSITORY:-$(git -C "$REPO" remote get-url origin |
+  sed -E 's#^(https://github\.com/|git@github\.com:)##; s#\.git$##')}
 KEEP_RELEASES=${RAPI_KEEP_RELEASES:-6}
 FAILED="$ROOT/.auto-deploy-failed"
 
@@ -41,8 +43,8 @@ CURRENT=$(jq -r .sha "$ROOT/current/release-manifest.json")
 [[ "$SHA" == "$CURRENT" ]] && exit 0
 grep -qx "$SHA" "$FAILED" 2>/dev/null && exit 0
 
-checks=$(curl -fsS -m 20 -H "Accept: application/vnd.github+json" \
-  "https://api.github.com/repos/$GITHUB_REPO/commits/$SHA/check-runs?per_page=100")
+# Authenticated: a private repository's checks are not readable anonymously.
+checks=$(timeout 20 gh api "repos/$GITHUB_REPO/commits/$SHA/check-runs?per_page=100")
 total=$(jq '.total_count' <<<"$checks")
 pending=$(jq '[.check_runs[] | select(.status != "completed")] | length' <<<"$checks")
 failed=$(jq -r '[.check_runs[] | select(.status == "completed" and
