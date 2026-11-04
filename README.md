@@ -1,3 +1,7 @@
+> **이 저장소는 더 이상 개발하지 않습니다.** 여기 있는 코드는 공개를 마친 시점의 스냅샷이고, 이후 개발은 비공개로 이어집니다. 이슈와 PR은 받지 않습니다. 저장소에 남아 있는 `External monitor` 워크플로는 운영 서비스를 감시하는 용도로 계속 돕니다.
+>
+> **This repository is no longer developed.** It is a snapshot of the code as of its last public commit; development continues privately. The `External monitor` workflow still runs here to watch the production service.
+
 # rapi-agent
 
 `rapi-agent`는 개인 Discord를 중심으로 정보를 수집하고, 정리하고, 필요한
