@@ -142,6 +142,26 @@ test("without a working model, posts go out with no untranslated excerpt", async
   assert.match(text, /규칙 요약인 한국어 문장이에요/);
 });
 
+test("a failed model call is written to the log", async (t) => {
+  const written: string[] = [];
+  t.mock.method(process.stderr, "write", (chunk: string) => {
+    written.push(chunk);
+    return true;
+  });
+  await blogFeeds(
+    {
+      policy: "t",
+      summarize: async () => new Map(),
+      curate: async () => {
+        throw new Error("codex down");
+      },
+    },
+    [blogItem("a")],
+    { drafts: [], marked: [] },
+  ).aiBlogs(now);
+  assert.match(written.join(""), /Curation ai-blogs model failed.*codex down/);
+});
+
 test("a day where the model rejects everything is settled, not retried", async () => {
   const sink = { drafts: [], marked: [] as string[] };
   await blogFeeds(

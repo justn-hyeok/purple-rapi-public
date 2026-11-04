@@ -15,6 +15,9 @@ function harness(catalog: unknown, openRouter: unknown[] = []) {
     recordCommunityPost: async (post: { key: string }) => {
       keys.add(post.key);
     },
+    deleteCommunityMarkers: async (gone: string[]) => {
+      for (const key of gone) keys.delete(key);
+    },
     managedDiscordResourceId: async () => "channel",
   };
   const feeds = new CommunityFeeds(store as never, undefined, {
@@ -80,7 +83,7 @@ test("coding-plan providers are ignored even when every row is $0", async () => 
   assert.equal(posts.length, 0);
 });
 
-test("a later model is new for learners, and an ended one is reported once", async () => {
+test("a later model is new for learners, and an ended one waits for a second check", async () => {
   const { feeds, keys, posts, state } = harness(
     zen(model("a"), model("b"), model("c")),
   );
@@ -88,11 +91,15 @@ test("a later model is new for learners, and an ended one is reported once", asy
   state.catalog = zen(model("a"), model("c"), model("d"));
   await feeds.freeCatalogModels();
   assert.equal(posts.length, 2);
-  assert.match(posts[1]!.title, /새 무료 모델 1개 · 무료 종료 1개/);
-  assert.match(posts[1]!.description, /더 이상 무료 아님\*\*\n- `b`/);
+  assert.match(posts[1]!.title, /새 무료 모델 1개$/);
   assert.ok(keys.has("free-model:opencode:d"));
+  state.catalog = zen(model("a"), model("c"), model("d"), model("e"));
   await feeds.freeCatalogModels();
-  assert.equal(posts.length, 2);
+  assert.equal(posts.length, 3);
+  assert.match(posts[2]!.title, /새 무료 모델 1개 · 무료 종료 1개/);
+  assert.match(posts[2]!.description, /더 이상 무료 아님\*\*\n- `b`/);
+  await feeds.freeCatalogModels();
+  assert.equal(posts.length, 3);
 });
 
 test("a list that collapses is treated as a catalog problem, not mass ending", async () => {
@@ -156,4 +163,28 @@ test("a known tool-less model still free is not reported as ended", async () => 
   keys.add("free-model:google/lyria");
   await feeds.freeModels();
   assert.equal(posts.length, 0);
+});
+
+test("a model missing from one response only is never reported", async () => {
+  const { feeds, posts, state } = harness(zen(model("a"), model("b")));
+  await feeds.freeCatalogModels();
+  state.catalog = zen(model("a"));
+  await feeds.freeCatalogModels();
+  state.catalog = zen(model("a"), model("b"));
+  await feeds.freeCatalogModels();
+  state.catalog = zen(model("a"));
+  await feeds.freeCatalogModels();
+  assert.equal(posts.length, 1, "two separate misses are not two in a row");
+});
+
+test("a model that came back can be reported as ended again", async () => {
+  const { feeds, keys, posts, state } = harness(zen(model("a"), model("b")));
+  keys.add("free-model-ended:opencode:b");
+  keys.add("free-seen:opencode:b");
+  await feeds.freeCatalogModels();
+  assert.ok(!keys.has("free-model-ended:opencode:b"));
+  state.catalog = zen(model("a"));
+  await feeds.freeCatalogModels();
+  await feeds.freeCatalogModels();
+  assert.match(posts.at(-1)!.title, /무료 종료 1개/);
 });
