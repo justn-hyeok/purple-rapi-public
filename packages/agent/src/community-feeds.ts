@@ -1,13 +1,20 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { readSource, type ItemSummarizer } from "@rapi/adapters";
+import {
+  readSource,
+  type CurationChannel,
+  type ItemSummarizer,
+  type SummaryInput,
+} from "@rapi/adapters";
 import {
   findCitations,
   isFreeTokenNews,
+  isOldStory,
   kstDateKey,
   kstReached,
   kstWeekday,
   plainText,
+  selectBlogItems,
   selectProjectRepositories,
   selectFeedTargets,
   type CitationCandidate,
@@ -29,6 +36,80 @@ export const CURATION_CHANNELS: Record<Feed, string> = {
 const clip = (value: string, limit: number) => {
   const text = value.replace(/\s+/g, " ").trim();
   return text.length <= limit ? text : `${text.slice(0, limit - 1)}…`;
+};
+
+/** Public model catalog with per-provider prices; about 6 MB. */
+const MODEL_CATALOG_URL = "https://models.dev/api.json";
+
+interface FreeProvider {
+  /** Marker scope; OpenRouter keeps the unscoped markers it already has. */
+  id?: string;
+  label: string;
+  url: string;
+  use: string;
+  caution: string;
+}
+
+const OPENROUTER: FreeProvider = {
+  label: "OpenRouter",
+  url: "https://openrouter.ai/models?max_price=0",
+  use: "OpenRouter API 키로 호출. [사용 제한 보기](https://openrouter.ai/docs/api-reference/limits)",
+  caution:
+    "스텔스 모델은 정체가 공개되지 않았어요. 민감한 내용은 넣지 마세요. 무료 조건은 예고 없이 바뀔 수 있어요.",
+};
+
+/**
+ * Providers whose $0 prices mean free to anyone. The catalog also lists coding
+ * plans at $0 because a subscription covers them, so this is not every $0 row.
+ */
+const FREE_CATALOG_PROVIDERS: Array<FreeProvider & { id: string }> = [
+  {
+    id: "opencode",
+    label: "OpenCode Zen",
+    url: "https://opencode.ai/docs/zen/",
+    use: "OpenCode에서 골라 쓰거나 Zen API 키로 호출",
+    caution:
+      "기간 한정 무료예요. 일부 모델은 무료 기간에 입력을 모델 개선에 쓸 수 있으니 문서의 Privacy를 확인하세요.",
+  },
+  {
+    id: "nvidia",
+    label: "NVIDIA NIM",
+    url: "https://build.nvidia.com/models",
+    use: "build.nvidia.com API 키로 호출",
+    caution: "체험용이에요. 사용 기록이 남으니 개인정보나 기밀은 넣지 마세요.",
+  },
+];
+const FREE_MODEL_LIST_LIMIT = 25;
+// Discord rejects a message whose embeds add up to more than 6000 characters.
+const AI_BLOG_MESSAGE_CHARS = 5_600;
+const AI_BLOG_CARD_CHARS = 3_900;
+// More than the card shows: the model drops some before the per-source cap.
+const AI_BLOG_CANDIDATES_PER_SOURCE = 8;
+const HANGUL = /[가-힣]/;
+
+interface FreeModel {
+  id: string;
+  name?: string | undefined;
+  context_length?: number | undefined;
+  tools?: boolean | undefined;
+  /** Last free day, when the provider has announced one. */
+  expires?: string | null | undefined;
+}
+
+/** A summary worth showing without a model: Korean, and more than the title again. */
+function usableSummary(summary: string, title: string): string {
+  const text = clip(plainText(summary, 400) || summary, 130);
+  return HANGUL.test(text) &&
+    !text.toLowerCase().startsWith(title.slice(0, 30).toLowerCase())
+    ? text
+    : "";
+}
+
+/** Keeps a list's line breaks and cuts it between lines. */
+const clipLines = (lines: string[], limit: number) => {
+  const text = lines.join("\n");
+  if (text.length <= limit) return text;
+  return text.slice(0, text.lastIndexOf("\n", limit));
 };
 
 export const CURATION_FEED_LABELS: Record<Feed, string> = {
@@ -93,7 +174,9 @@ export class CommunityFeeds {
                 ? { Authorization: `Bearer ${options.githubToken}` }
                 : {}),
             },
-            { timeoutMs: 20_000, maxBodyBytes: 4_000_000 },
+            url === MODEL_CATALOG_URL
+              ? { timeoutMs: 60_000, maxBodyBytes: 16_000_000 }
+              : { timeoutMs: 20_000, maxBodyBytes: 4_000_000 },
           )
         ).body);
     this.getJson =
@@ -256,8 +339,10 @@ export class CommunityFeeds {
     if (kstWeekday(now) === 1 && kstReached(now, 10))
       await run("stars", () => this.stars(now));
     if (kstReached(now, 9)) await run("ai-blogs", () => this.aiBlogs(now));
-    if (await this.due("free-tokens", 6 * 3_600_000, now, "free-models:"))
+    if (await this.due("free-tokens", 6 * 3_600_000, now, "free-models:")) {
       await run("free-models", () => this.freeModels());
+      await run("free-catalog", () => this.freeCatalogModels());
+    }
     if (kstReached(now, 9, 5)) await run("free-news", () => this.freeNews(now));
     return failures;
   }
@@ -460,6 +545,29 @@ export class CommunityFeeds {
     ]);
   }
 
+  /** The model's picks; null when it is missing or failed, so the post goes out without it. */
+  private async curate(
+    channel: CurationChannel,
+    items: SummaryInput[],
+  ): Promise<Map<string, string> | null> {
+    if (!this.summarizer?.curate) return null;
+    try {
+      return await this.summarizer.curate(items, channel);
+    } catch {
+      return null;
+    }
+  }
+
+  private async markChecked(feed: Feed, key: string): Promise<void> {
+    await this.store.recordCommunityPost({
+      key,
+      feed,
+      channelId: null,
+      messageId: null,
+      data: {},
+    });
+  }
+
   async aiBlogs(now: Date): Promise<void> {
     const key = `ai-blogs:${kstDateKey(now)}`;
     if (await this.store.communityPostExists(key)) return;
@@ -470,38 +578,61 @@ export class CommunityFeeds {
     const others: CitationCandidate[] = await this.store.citationCandidates(
       new Date(now.getTime() - 7 * 86_400_000),
     );
+    const candidates = selectBlogItems(official, AI_BLOG_CANDIDATES_PER_SOURCE);
+    const curated = await this.curate(
+      "ai-blogs",
+      candidates.map((item) => ({
+        id: item.id,
+        title: item.title,
+        url: item.url,
+        body: item.summary,
+      })),
+    );
+    const chosen = selectBlogItems(
+      curated ? candidates.filter((item) => curated.has(item.id)) : candidates,
+    );
+    if (!chosen.length) {
+      // Every post was judged off-topic: nothing to send, and no new model call today.
+      await this.markChecked("ai-blogs", key);
+      return;
+    }
     // One card per source, so a day with eight posts reads as three short lists.
     const bySource = new Map<string, typeof official>();
-    for (const item of official.slice(0, 12))
+    for (const item of chosen)
       bySource.set(item.source, [...(bySource.get(item.source) ?? []), item]);
-    const embeds = [...bySource.entries()]
-      .slice(0, 10)
-      .map(([source, items]) => ({
-        title: clip(`${source} · ${items.length}건`, 250),
-        description: items
-          .map((item) => {
-            const cited = findCitations(item, others).slice(0, 3);
-            const title = clip(plainText(item.title, 300) || item.title, 110);
-            const summary = clip(
-              plainText(item.summary, 400) || item.summary,
-              110,
-            );
-            return [
-              `**[${title.replace(/[[\]]/g, "")}](${item.url})**`,
-              summary,
-              ...(cited.length
-                ? [
-                    `-# 다룬 곳 ${cited.length} · ${cited
-                      .map((c) => `[${clip(c.source, 24)}](${c.url})`)
-                      .join(" · ")}`,
-                  ]
-                : []),
-            ].join("\n");
-          })
-          .join("\n\n")
-          .slice(0, 3900),
+    let room = AI_BLOG_MESSAGE_CHARS;
+    const embeds: Embed[] = [];
+    for (const [source, items] of [...bySource.entries()].slice(0, 10)) {
+      const blocks: string[] = [];
+      let used = 40;
+      for (const item of items) {
+        const cited = findCitations(item, others).slice(0, 3);
+        const title = clip(plainText(item.title, 300) || item.title, 110);
+        const summary =
+          curated?.get(item.id) ?? usableSummary(item.summary, title);
+        const block = [
+          `**[${title.replace(/[[\]]/g, "")}](${item.url})**`,
+          ...(summary ? [summary] : []),
+          ...(cited.length
+            ? [
+                `-# 다룬 곳 ${cited.length} · ${cited
+                  .map((c) => `[${clip(c.source, 24)}](${c.url})`)
+                  .join(" · ")}`,
+              ]
+            : []),
+        ].join("\n");
+        if (used + block.length + 2 > Math.min(room, AI_BLOG_CARD_CHARS)) break;
+        blocks.push(block);
+        used += block.length + 2;
+      }
+      if (!blocks.length) continue;
+      room -= used;
+      embeds.push({
+        title: clip(`${source} · ${blocks.length}건`, 40),
+        description: blocks.join("\n\n"),
         color: 0x365d46,
-      }));
+      });
+    }
     await this.publish("ai-blogs", key, embeds);
   }
 
@@ -513,47 +644,166 @@ export class CommunityFeeds {
             id: string;
             name?: string;
             context_length?: number;
+            expiration_date?: string | null;
+            supported_parameters?: string[];
             pricing?: { prompt?: string; completion?: string };
           }>;
         }
       ).data ?? [];
-    const free = models.filter(
-      (m) => m.pricing?.prompt === "0" && m.pricing.completion === "0",
+    await this.syncFreeModels(
+      OPENROUTER,
+      models
+        .filter(
+          (m) => m.pricing?.prompt === "0" && m.pricing.completion === "0",
+        )
+        .map((m) => ({
+          id: m.id,
+          name: m.name,
+          context_length: m.context_length,
+          tools: m.supported_parameters?.includes("tools"),
+          expires: m.expiration_date,
+        })),
     );
-    const known = new Set(await this.store.communityPostKeys("free-model:"));
-    const first = known.size === 0;
-    const fresh = free.filter((m) => !known.has(`free-model:${m.id}`));
-    for (const model of fresh)
-      await this.store.recordCommunityPost({
-        key: `free-model:${model.id}`,
+  }
+
+  /** The free models of other providers, read from one public catalog. */
+  async freeCatalogModels(): Promise<void> {
+    const catalog = (await this.getJson(
+      MODEL_CATALOG_URL,
+      "application/json",
+    )) as Record<
+      string,
+      | {
+          models?: Record<
+            string,
+            {
+              id: string;
+              name?: string;
+              status?: string | null;
+              tool_call?: boolean;
+              release_date?: string;
+              cost?: { input?: number; output?: number };
+              limit?: { context?: number };
+            }
+          >;
+        }
+      | undefined
+    >;
+    for (const provider of FREE_CATALOG_PROVIDERS) {
+      const free = Object.values(catalog[provider.id]?.models ?? {})
+        .filter(
+          (m) =>
+            m.cost?.input === 0 &&
+            m.cost.output === 0 &&
+            m.status !== "deprecated",
+        )
+        .sort((a, b) =>
+          (b.release_date ?? "").localeCompare(a.release_date ?? ""),
+        )
+        .map((m) => ({
+          id: m.id,
+          name: m.name,
+          context_length: m.limit?.context,
+          tools: m.tool_call,
+        }));
+      await this.syncFreeModels(provider, free);
+    }
+  }
+
+  /**
+   * Posts what changed since the last look at one provider's free list. Its
+   * first list is posted once as a whole, under markers the learner issue does
+   * not count as new. An empty or much shorter list is treated as a catalog
+   * problem, not as every model's free period ending. Only models that can
+   * call tools are announced: the rest are guard, embedding, detection or music
+   * models that bill per song, which nobody can code with.
+   */
+  private async syncFreeModels(
+    provider: FreeProvider,
+    free: FreeModel[],
+  ): Promise<void> {
+    if (!free.length) return;
+    const scope = provider.id ? `${provider.id}:` : "";
+    const otherScopes = FREE_CATALOG_PROVIDERS.map((p) => `${p.id}:`);
+    const ids = async (prefix: string) =>
+      (await this.store.communityPostKeys(prefix))
+        .map((key) => key.slice(prefix.length))
+        .filter((id) => scope || !otherScopes.some((s) => id.startsWith(s)));
+    const seen = new Set([
+      ...(await ids(`free-model:${scope}`)),
+      ...(await ids(`free-seen:${scope}`)),
+    ]);
+    const first = seen.size === 0;
+    const mark = (key: string, name: string) =>
+      this.store.recordCommunityPost({
+        key,
         feed: "free-tokens",
         channelId: null,
         messageId: null,
-        data: { name: model.name ?? model.id },
+        data: { name },
       });
-    if (!fresh.length) return;
-    const list = fresh
-      .slice(0, 25)
-      .map(
-        (m) =>
-          `- **${m.name ?? m.id}** \`${m.id}\`${m.context_length ? ` · 컨텍스트 ${Math.round(m.context_length / 1000)}K` : ""}`,
+    const usable = free.filter((m) => m.tools);
+    const fresh = usable.filter((m) => !seen.has(m.id));
+    for (const model of fresh)
+      await mark(
+        `${first && provider.id ? "free-seen" : "free-model"}:${scope}${model.id}`,
+        model.name ?? model.id,
       );
+    const current = new Set(free.map((m) => m.id));
+    const reported = new Set(await ids(`free-model-ended:${scope}`));
+    const ended =
+      free.length * 2 < seen.size
+        ? []
+        : [...seen].filter((id) => !current.has(id) && !reported.has(id));
+    for (const id of ended) await mark(`free-model-ended:${scope}${id}`, id);
+    if (!fresh.length && !ended.length) return;
+    const lines = (items: string[]) => [
+      ...items.slice(0, FREE_MODEL_LIST_LIMIT),
+      ...(items.length > FREE_MODEL_LIST_LIMIT
+        ? [`- 외 ${items.length - FREE_MODEL_LIST_LIMIT}개`]
+        : []),
+    ];
+    const added = lines(
+      fresh.map((m) =>
+        [
+          `- **${m.name ?? m.id}** \`${m.id}\``,
+          ...(m.context_length
+            ? [`컨텍스트 ${Math.round(m.context_length / 1000)}K`]
+            : []),
+          ...(m.expires ? [`${m.expires}까지 무료`] : []),
+        ].join(" · "),
+      ),
+    );
+    const gone = lines(ended.map((id) => `- \`${id}\``));
+    const title = first
+      ? `${provider.label}에서 지금 무료인 모델 ${usable.length}개`
+      : !ended.length
+        ? `${provider.label} 새 무료 모델 ${fresh.length}개`
+        : !fresh.length
+          ? `${provider.label} 무료 종료 ${ended.length}개`
+          : `${provider.label} 새 무료 모델 ${fresh.length}개 · 무료 종료 ${ended.length}개`;
     await this.publish(
       "free-tokens",
       `free-models-post:${createHash("sha256")
-        .update(fresh.map((m) => m.id).join(","))
+        .update([scope, ...fresh.map((m) => m.id), "ended", ...ended].join(","))
         .digest("hex")
         .slice(0, 16)}`,
       [
         {
-          title: first
-            ? `OpenRouter에서 지금 무료인 모델 ${free.length}개`
-            : `OpenRouter 새 무료 모델 ${fresh.length}개`,
-          url: "https://openrouter.ai/models?max_price=0",
-          description: clip(list.join("\n"), 3900),
-          footer: {
-            text: "무료 모델은 사용량 제한이 있고 예고 없이 바뀔 수 있습니다.",
-          },
+          title,
+          url: provider.url,
+          description: clipLines(
+            [
+              `사용법: ${provider.use}`,
+              "도구 호출이 되는 모델만 모았어요.",
+              "",
+              ...added,
+              ...(added.length && gone.length ? [""] : []),
+              ...(gone.length ? ["**더 이상 무료 아님**", ...gone] : []),
+            ],
+            3900,
+          ),
+          footer: { text: provider.caution },
           color: 0x365d46,
         },
       ],
@@ -563,23 +813,39 @@ export class CommunityFeeds {
   async freeNews(now: Date): Promise<void> {
     const key = `free-news:${kstDateKey(now)}`;
     if (await this.store.communityPostExists(key)) return;
-    const items = (
+    const matches = (
       await this.store.citationCandidates(
         new Date(now.getTime() - 26 * 3_600_000),
+        true,
       )
-    ).filter((item) => isFreeTokenNews(item.title, item.body));
-    if (!items.length) return;
+    )
+      .filter((item) => isFreeTokenNews(item.title, item.body))
+      .filter((item) => !isOldStory(item.title, now));
+    if (!matches.length) return;
+    const curated = await this.curate(
+      "free-tokens",
+      matches.slice(0, 20).map((item) => ({
+        id: item.id,
+        title: item.title,
+        url: item.url,
+        body: item.body,
+      })),
+    );
+    const items = curated
+      ? matches.filter((item) => curated.has(item.id))
+      : matches;
+    if (!items.length) {
+      await this.markChecked("free-tokens", key);
+      return;
+    }
     await this.publish("free-tokens", key, [
       {
         title: `무료 크레딧·무료 티어 소식 ${items.length}건`,
-        description: clip(
-          items
-            .slice(0, 10)
-            .map(
-              (i) =>
-                `- [${clip(plainText(i.title, 200) || i.title, 90)}](${i.url}) · ${i.source}`,
-            )
-            .join("\n"),
+        description: clipLines(
+          items.slice(0, 10).map((i) => {
+            const summary = curated?.get(i.id);
+            return `- [${clip(plainText(i.title, 200) || i.title, 90)}](${i.url}) · ${i.source}${summary ? `\n  ${summary}` : ""}`;
+          }),
           3900,
         ),
         color: 0x365d46,

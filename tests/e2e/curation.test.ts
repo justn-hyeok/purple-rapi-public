@@ -34,7 +34,12 @@ describe("curation feeds", () => {
       );
       await writeFile(setupFile, "# 세팅\n\n- Herdr\n- Codex\n");
       let models = [
-        { id: "a:free", name: "A", pricing: { prompt: "0", completion: "0" } },
+        {
+          id: "a:free",
+          name: "A",
+          supported_parameters: ["tools"],
+          pricing: { prompt: "0", completion: "0" },
+        },
         { id: "paid", pricing: { prompt: "1", completion: "1" } },
       ];
       const feeds = new CommunityFeeds(
@@ -190,7 +195,12 @@ describe("curation feeds", () => {
       const before = posts.length;
       models = [
         ...models,
-        { id: "b:free", name: "B", pricing: { prompt: "0", completion: "0" } },
+        {
+          id: "b:free",
+          name: "B",
+          supported_parameters: ["tools"],
+          pricing: { prompt: "0", completion: "0" },
+        },
       ];
       await store.pool.query(
         "DELETE FROM community_posts WHERE starts_with(key,'free-models:') OR starts_with(key,'projects:check:')",

@@ -1378,24 +1378,30 @@ export class PostgresStore {
       title: string;
       summary: string;
       source: string;
+      aiOnly: boolean;
     }>
   > {
     const result = await this.pool.query(
       `SELECT si.id,si.canonical_url AS url,si.title,
        COALESCE((SELECT sm.content FROM summaries sm WHERE si.id=ANY(sm.evidence_item_ids) AND sm.purpose='item'
          ORDER BY (sm.model_policy_version='rules-v1'), sm.created_at DESC LIMIT 1),si.body) AS summary,
-       COALESCE(src.collection_policy->>'label',src.locator) AS source
+       COALESCE(src.collection_policy->>'label',src.locator) AS source,
+       COALESCE(src.collection_policy->>'aiOnly','false')='true' AS "aiOnly"
        FROM source_items si JOIN raw_events re ON re.id=si.raw_event_id JOIN sources src ON src.id=re.source_id
-       WHERE src.collection_policy->>'official'='true' AND si.visibility='public' AND si.collected_at>=$1
+       WHERE (src.collection_policy->>'official'='true' OR src.collection_policy->>'aiBlog'='true')
+         AND si.visibility='public' AND si.collected_at>=$1
          AND COALESCE(si.published_at,si.collected_at)>now()-interval '3 days'
-       ORDER BY COALESCE(si.published_at,si.collected_at) DESC LIMIT 20`,
+       ORDER BY COALESCE(si.published_at,si.collected_at) DESC LIMIT 60`,
       [since],
     );
     return result.rows as never;
   }
 
-  /** Recent public items from non-official sources, to match citations and free-credit news. */
-  async citationCandidates(since: Date): Promise<
+  /** Recent public items from non-official sources, to match citations; `includeOfficial` also searches vendor posts, for free-credit news. */
+  async citationCandidates(
+    since: Date,
+    includeOfficial = false,
+  ): Promise<
     Array<{
       id: string;
       url: string;
@@ -1408,9 +1414,10 @@ export class PostgresStore {
       `SELECT si.id,si.canonical_url AS url,si.title,left(si.body,4000) AS body,
        COALESCE(src.collection_policy->>'label',src.locator) AS source
        FROM source_items si JOIN raw_events re ON re.id=si.raw_event_id JOIN sources src ON src.id=re.source_id
-       WHERE si.visibility='public' AND src.collection_policy->>'official' IS DISTINCT FROM 'true' AND si.collected_at>=$1
+       WHERE si.visibility='public' AND ($2 OR src.collection_policy->>'official' IS DISTINCT FROM 'true') AND si.collected_at>=$1
+         AND ($2=false OR COALESCE(si.published_at,si.collected_at)>now()-interval '14 days')
        ORDER BY si.collected_at DESC LIMIT 3000`,
-      [since],
+      [since, includeOfficial],
     );
     return result.rows as never;
   }
