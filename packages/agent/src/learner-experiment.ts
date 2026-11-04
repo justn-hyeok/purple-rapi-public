@@ -293,7 +293,7 @@ export class LearnerExperiment {
         postKey: freeModelsKey,
         section: "core",
         title: `새 무료 모델 ${freeModels}개`,
-        summary: "OpenRouter에 새로 올라온 무료 모델이에요.",
+        summary: "무료 모델 목록에 새로 올라온 모델이에요.",
         url: FREE_MODELS_URL,
       });
     return selectLearnerItems(items);
