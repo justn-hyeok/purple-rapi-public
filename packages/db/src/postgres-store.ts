@@ -972,6 +972,15 @@ export class PostgresStore {
     return result.rows[0]?.at ?? null;
   }
 
+  /** Removes bookkeeping markers; real posts and drafts are never touched. */
+  async deleteCommunityMarkers(keys: string[]): Promise<void> {
+    if (!keys.length) return;
+    await this.pool.query(
+      "DELETE FROM community_posts WHERE state='marker' AND key=ANY($1)",
+      [keys],
+    );
+  }
+
   async communityPostKeys(prefix: string): Promise<string[]> {
     const result = await this.pool.query<{ key: string }>(
       "SELECT key FROM community_posts WHERE starts_with(key,$1)",

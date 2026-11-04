@@ -553,7 +553,10 @@ export class CommunityFeeds {
     if (!this.summarizer?.curate) return null;
     try {
       return await this.summarizer.curate(items, channel);
-    } catch {
+    } catch (error) {
+      process.stderr.write(
+        `Curation ${channel} model failed, posting without it: ${error instanceof Error ? error.message.slice(0, 200) : "unknown"}\n`,
+      );
       return null;
     }
   }
@@ -751,10 +754,24 @@ export class CommunityFeeds {
       );
     const current = new Set(free.map((m) => m.id));
     const reported = new Set(await ids(`free-model-ended:${scope}`));
-    const ended =
+    const missing = new Set(await ids(`free-model-missing:${scope}`));
+    // A model that came back can end again, and a one-off miss no longer counts.
+    await this.store.deleteCommunityMarkers([
+      ...[...reported]
+        .filter((id) => current.has(id))
+        .map((id) => `free-model-ended:${scope}${id}`),
+      ...[...missing]
+        .filter((id) => current.has(id))
+        .map((id) => `free-model-missing:${scope}${id}`),
+    ]);
+    const gone =
       free.length * 2 < seen.size
         ? []
         : [...seen].filter((id) => !current.has(id) && !reported.has(id));
+    // One response can be partial, so a model ends after two checks in a row.
+    const ended = gone.filter((id) => missing.has(id));
+    for (const id of gone)
+      if (!missing.has(id)) await mark(`free-model-missing:${scope}${id}`, id);
     for (const id of ended) await mark(`free-model-ended:${scope}${id}`, id);
     if (!fresh.length && !ended.length) return;
     const lines = (items: string[]) => [
@@ -774,7 +791,7 @@ export class CommunityFeeds {
         ].join(" · "),
       ),
     );
-    const gone = lines(ended.map((id) => `- \`${id}\``));
+    const endedLines = lines(ended.map((id) => `- \`${id}\``));
     const title = first
       ? `${provider.label}에서 지금 무료인 모델 ${usable.length}개`
       : !ended.length
@@ -798,8 +815,10 @@ export class CommunityFeeds {
               "도구 호출이 되는 모델만 모았어요.",
               "",
               ...added,
-              ...(added.length && gone.length ? [""] : []),
-              ...(gone.length ? ["**더 이상 무료 아님**", ...gone] : []),
+              ...(added.length && endedLines.length ? [""] : []),
+              ...(endedLines.length
+                ? ["**더 이상 무료 아님**", ...endedLines]
+                : []),
             ],
             3900,
           ),
